@@ -1,5 +1,5 @@
 import streamlit as st
-from supabase import create_client
+import requests
 import google.generativeai as genai
 
 # 1. Page Config
@@ -18,39 +18,36 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. THE BULLETPROOF CONNECTION FIX
-# ==========================================
-try:
-    raw_url = str(st.secrets["SUPABASE_URL"])
-    raw_key = str(st.secrets["SUPABASE_KEY"])
-    
-    # Aggressively clean the URL of quotes, spaces, and wrong paths
-    clean_url = raw_url.replace('"', '').replace("'", "").replace("/rest/v1/", "").replace("/rest/v1", "").strip()
-    if clean_url.endswith("/"):
-        clean_url = clean_url[:-1]
-    if not clean_url.startswith("http"):
-        clean_url = "https://" + clean_url
-        
-    # Clean the keys
-    clean_key = raw_key.replace('"', '').replace("'", "").strip()
-    clean_gemini = str(st.secrets["GEMINI_API_KEY"]).replace('"', '').replace("'", "").strip()
+# 2. Clean Secrets
+url = st.secrets["SUPABASE_URL"].strip().replace('"', '').replace("'", "").rstrip('/')
+key = st.secrets["SUPABASE_KEY"].strip().replace('"', '').replace("'", "")
+gemini_key = st.secrets["GEMINI_API_KEY"].strip().replace('"', '').replace("'", "")
 
-    # Connect
-    supabase = create_client(clean_url, clean_key)
-    genai.configure(api_key=clean_gemini)
+try:
+    genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel('gemini-2.5-flash')
-except Exception as e:
-    st.error(f"Failed to read secrets properly: {e}")
-    st.stop()
-# ==========================================
+except Exception:
+    st.error("Failed to connect to Gemini AI.")
 
-# 3. Fetch Data Safely
+# 3. Direct HTTP Connection (Bypassing the buggy Supabase library)
+headers = {
+    "apikey": key,
+    "Authorization": f"Bearer {key}",
+    "Content-Type": "application/json"
+}
+
 try:
-    response = supabase.table("applications").select("*").order("created_at", desc=True).execute()
-    jobs = response.data if response.data else []
+    # Fetch data directly from the REST API
+    endpoint = f"{url}/rest/v1/applications?select=*&order=created_at.desc"
+    res = requests.get(endpoint, headers=headers, timeout=10)
+    
+    if res.status_code == 200:
+        jobs = res.json()
+    else:
+        st.error(f"Database Rejected Connection: {res.status_code} - {res.text}")
+        st.stop()
 except Exception as e:
-    st.error(f"🚨 Network Error: Check if this URL is correct: `{clean_url}`")
+    st.error(f"Direct connection failed. Streamlit is blocking the network: {e}")
     st.stop()
 
 # Calculate Stats
@@ -81,13 +78,13 @@ if page == "📊 Live Job Stream":
         for row in jobs:
             with st.container():
                 c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-                c1.markdown(f"**{row['title']}**")
-                c2.markdown(f"🏢 {row['company']}")
-                c3.markdown(f"`{row['status']}`")
-                c4.link_button("Review & Submit", row['apply_url'], use_container_width=True)
+                c1.markdown(f"**{row.get('title', 'Unknown Role')}**")
+                c2.markdown(f"🏢 {row.get('company', 'Unknown Company')}")
+                c3.markdown(f"`{row.get('status', 'Ready')}`")
+                c4.link_button("Review & Submit", row.get('apply_url', '#'), use_container_width=True)
                 st.markdown("<hr style='margin: 0.5em 0px; border-color: #2A2D3D;'>", unsafe_allow_html=True)
     else:
-        st.info("Waiting for jobs to be found...")
+        st.info("No jobs found in the database yet. Waiting for morning run...")
 
 # 6. AI Chat View
 elif page == "💬 Chat with AI":
@@ -107,18 +104,27 @@ elif page == "💬 Chat with AI":
 
         with st.chat_message("assistant"):
             if "http" in prompt:
-                supabase.table("applications").insert({
+                # Direct POST request to save the link
+                payload = {
                     "title": "Manual Extraction",
                     "company": "Pending",
                     "location": "Custom",
                     "apply_url": prompt,
                     "status": "Queued for Next Run"
-                }).execute()
-                reply = "✅ **Link captured.** Added to the database queue."
+                }
+                post_res = requests.post(f"{url}/rest/v1/applications", headers=headers, json=payload)
+                
+                if post_res.status_code in [200, 201]:
+                    reply = "✅ **Link captured.** Added to the database queue."
+                else:
+                    reply = f"❌ Failed to save. Database code: {post_res.status_code}"
             else:
                 context = f"Total jobs: {total_jobs}. Recent jobs: {jobs[:3]}"
-                ai_response = model.generate_content(f"You are a sleek AI job agent. Answer briefly based on this data: {context}. User says: {prompt}")
-                reply = ai_response.text
+                try:
+                    ai_response = model.generate_content(f"You are a sleek AI job agent. Answer briefly based on this data: {context}. User says: {prompt}")
+                    reply = ai_response.text
+                except:
+                    reply = "AI is currently unavailable. Check your Gemini API key."
             st.markdown(reply)
             
         st.session_state.messages.append({"role": "assistant", "content": reply})
