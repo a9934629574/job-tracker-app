@@ -1,211 +1,265 @@
 import html
+import re
 from datetime import datetime
 
+import altair as alt
+import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="Job Assistant", page_icon="💼", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Job Assistant", page_icon="🚀", layout="wide", initial_sidebar_state="collapsed")
 
-# ───────────────────────── Styling ─────────────────────────
+# ───────────────────────── Style ─────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&display=swap');
-:root{--bg:#EEF1F6;--panel:#FFFFFF;--ink:#101828;--muted:#667085;--line:#E2E6EE;--accent:#2F4BFF;--ok:#12B76A;--wait:#F79009;}
-.stApp{background:var(--bg)!important;color:var(--ink)!important;font-family:'Figtree',sans-serif;}
-header[data-testid="stHeader"],#MainMenu,footer{visibility:hidden;height:0;}
-.block-container{max-width:1280px;padding:2.2rem 2rem 3rem;}
-h1,h2,h3,.display{font-family:'Bricolage Grotesque',sans-serif!important;letter-spacing:-.02em;color:var(--ink)!important;}
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;700;800&family=Inter:wght@400;500;600&display=swap');
+:root{--bg:#0B1020;--panel:#141B30;--line:#26304D;--ink:#EEF1FB;--muted:#8F9ABB;
+--a:#8B6CFF;--b:#22D3EE;--ok:#34D399;--wait:#FBBF24;--bad:#F87171;}
+html,body,.stApp{background:radial-gradient(1200px 500px at 85% -10%,rgba(139,108,255,.18),transparent),var(--bg)!important;
+  color:var(--ink)!important;font-family:'Inter',sans-serif;}
+header[data-testid="stHeader"],#MainMenu,footer{display:none;}
+.block-container{max-width:1250px;padding:2rem 2rem 4rem;}
+h1,h2,h3,.sora{font-family:'Sora',sans-serif!important;letter-spacing:-.02em;}
 
-.top{display:flex;justify-content:space-between;align-items:flex-end;gap:1rem;margin-bottom:1.6rem;flex-wrap:wrap;}
-.top h1{font-size:2.5rem;margin:0;line-height:1.05;}
-.top p{color:var(--muted);margin:.5rem 0 0;max-width:46ch;line-height:1.5;}
-.live{display:inline-flex;align-items:center;gap:.5rem;background:var(--panel);border:1px solid var(--line);
-  padding:.45rem .9rem;border-radius:999px;font-size:.85rem;color:var(--muted);}
-.live i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px rgba(18,183,106,.18);}
-
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:1.4rem 1.5rem;}
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1rem;}
+.hero h1{font-size:2.6rem;font-weight:800;margin:0;
+  background:linear-gradient(90deg,var(--a),var(--b));-webkit-background-clip:text;background-clip:text;color:transparent;}
+.hero p{color:var(--muted);margin:.4rem 0 1.4rem;}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin:.4rem 0 1.2rem;}
 @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr);}}
-.kpi .l{color:var(--muted);font-size:.85rem;}
-.kpi .v{font-family:'Bricolage Grotesque',sans-serif;font-size:2.6rem;font-weight:700;line-height:1.1;margin-top:.3rem;}
-.kpi .s{color:var(--muted);font-size:.8rem;margin-top:.2rem;}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:1.1rem 1.2rem;position:relative;overflow:hidden;}
+.kpi:before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c);}
+.kpi .l{color:var(--muted);font-size:.85rem}
+.kpi .v{font-family:'Sora',sans-serif;font-weight:800;font-size:2.4rem;margin-top:.2rem;color:var(--c)}
+.kpi .s{color:var(--muted);font-size:.78rem}
 
-.funnel{margin-bottom:1.4rem;}
-.funnel .row{display:flex;justify-content:space-between;font-size:.9rem;margin-bottom:.7rem;}
-.funnel .row b{font-family:'Bricolage Grotesque',sans-serif;font-size:1.05rem;}
-.bar{display:flex;height:16px;border-radius:999px;overflow:hidden;background:var(--line);}
-.bar span{display:block;height:100%;}
-.legend{display:flex;gap:1.4rem;margin-top:.8rem;font-size:.82rem;color:var(--muted);}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.4rem;}
+.chip{display:inline-block;font-size:.76rem;font-weight:600;padding:.25rem .65rem;border-radius:999px;}
+.chip.ok{background:rgba(52,211,153,.14);color:var(--ok);} .chip.wait{background:rgba(251,191,36,.14);color:var(--wait);}
+.sub{color:var(--muted);font-size:.85rem}
 
-.ledger-h{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.4rem;}
-.ledger-h h3{margin:0;font-size:1.25rem;}
-.ledger-h span{color:var(--muted);font-size:.85rem;}
-.job{display:grid;grid-template-columns:1fr auto;gap:.8rem;align-items:center;padding:.95rem 0;border-top:1px solid var(--line);}
-.job:first-of-type{border-top:none;}
-.job .t{font-weight:600;font-size:1rem;}
-.job .m{color:var(--muted);font-size:.85rem;margin-top:.15rem;}
-.job a{color:var(--accent);text-decoration:none;font-weight:600;font-size:.85rem;margin-left:.9rem;}
-.job a:hover{text-decoration:underline;}
-.chip{display:inline-flex;align-items:center;font-size:.78rem;font-weight:600;padding:.28rem .65rem;border-radius:999px;white-space:nowrap;}
-.chip.ok{background:rgba(18,183,106,.12);color:#067647;}
-.chip.wait{background:rgba(247,144,9,.14);color:#B54708;}
-.empty{text-align:center;color:var(--muted);padding:2.5rem 1rem;line-height:1.6;}
+/* tabs */
+.stTabs [data-baseweb="tab-list"]{gap:.4rem;border-bottom:1px solid var(--line);}
+.stTabs [data-baseweb="tab"]{height:44px;padding:0 1.1rem;border-radius:12px 12px 0 0;color:var(--muted);font-weight:600;}
+.stTabs [aria-selected="true"]{color:var(--ink)!important;background:linear-gradient(180deg,rgba(139,108,255,.22),transparent);}
+.stTabs [data-baseweb="tab-highlight"]{background:linear-gradient(90deg,var(--a),var(--b))!important;height:3px;}
 
-/* inputs */
-div[data-baseweb="input"],div[data-baseweb="select"]>div{background:var(--panel)!important;border-color:var(--line)!important;border-radius:12px!important;}
-.stTextInput input{color:var(--ink)!important;}
-.stButton>button{border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-weight:600;}
-.stButton>button:hover{border-color:var(--accent);color:var(--accent);}
-[data-testid="stChatInput"]{border-radius:14px;}
-[data-testid="stChatMessage"]{background:transparent;}
-div[data-testid="stVerticalBlockBorderWrapper"]{background:var(--panel);border-radius:18px;}
+/* inputs: always readable */
+input,textarea,[data-baseweb="select"] *{color:var(--ink)!important;}
+div[data-baseweb="input"],div[data-baseweb="textarea"],div[data-baseweb="select"]>div{background:var(--panel)!important;border:1px solid var(--line)!important;border-radius:12px!important;}
+div[data-baseweb="input"]:focus-within,div[data-baseweb="textarea"]:focus-within{border-color:var(--a)!important;box-shadow:0 0 0 3px rgba(139,108,255,.25)!important;}
+[data-testid="stChatInput"],[data-testid="stChatInput"] textarea{background:var(--panel)!important;color:var(--ink)!important;}
+[data-testid="stChatInput"]{border:1px solid var(--line);border-radius:14px;}
+[data-testid="stChatMessage"]{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:.8rem 1rem;}
+[data-testid="stChatMessage"] *{color:var(--ink);}
+.stButton>button,.stLinkButton>a,.stFormSubmitButton>button{border-radius:11px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-weight:600;transition:.15s;}
+.stButton>button:hover,.stLinkButton>a:hover,.stFormSubmitButton>button:hover{border-color:var(--a);transform:translateY(-1px);box-shadow:0 6px 18px rgba(139,108,255,.25);}
+.stFormSubmitButton>button,.stButton>button[kind="primary"]{background:linear-gradient(90deg,var(--a),var(--b))!important;border:none!important;color:#0B1020!important;}
+div[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--line)!important;border-radius:14px!important;background:var(--panel);}
 </style>
 """, unsafe_allow_html=True)
 
-# ───────────────────────── Secrets & data ─────────────────────────
-def clean(v: str) -> str:
-    return v.strip().strip("\"'")
+# ───────────────────────── Config ─────────────────────────
+def clean(v): return str(v).strip().strip("\"'")
 
-SUPABASE_URL = clean(st.secrets["SUPABASE_URL"]).rstrip("/")
-SUPABASE_KEY = clean(st.secrets["SUPABASE_KEY"])
-GEMINI_KEY = clean(st.secrets["GEMINI_API_KEY"])
-GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+SB_URL = clean(st.secrets["SUPABASE_URL"]).rstrip("/")
+SB_KEY = clean(st.secrets["SUPABASE_KEY"])
+G_KEY = clean(st.secrets["GEMINI_API_KEY"])
+G_BASE = "https://generativelanguage.googleapis.com/v1beta"
+SB_H = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
-HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
+def sb(method, path, **kw):
+    return requests.request(method, f"{SB_URL}/rest/v1/{path}", headers=SB_H, timeout=10, **kw)
 
-
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=10, show_spinner=False)
 def fetch_jobs():
     try:
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/applications?select=*&order=created_at.desc",
-                         headers=HEADERS, timeout=8)
-        if r.status_code == 200:
-            return r.json(), None
-        return [], f"Database returned {r.status_code}: {r.text[:200]}"
+        r = sb("GET", "applications?select=*&order=created_at.desc&limit=2000")
+        return (r.json(), None) if r.status_code == 200 else ([], f"Database error {r.status_code}: {r.text[:200]}")
     except requests.RequestException as e:
-        return [], f"Could not reach the database: {e}"
+        return [], f"Can't reach the database: {e}"
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def gemini_models():
+    """Ask Google which models this key can actually use, newest Flash first."""
+    try:
+        r = requests.get(f"{G_BASE}/models?pageSize=200", headers={"x-goog-api-key": G_KEY}, timeout=10)
+        r.raise_for_status()
+        names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])]
+    except Exception:
+        return [], None
+    bad = ("image", "tts", "audio", "live", "embedding", "robotics", "computer", "preview", "exp", "thinking")
+    flash = [n for n in names if "flash" in n and not any(b in n for b in bad)] or [n for n in names if "flash" in n] or names
+    ver = lambda n: tuple(int(x) for x in re.findall(r"\d+", n)) or (0,)
+    flash.sort(key=lambda n: (ver(n), "lite" not in n), reverse=True)
+    return names, (flash[0] if flash else None)
 
-jobs, db_error = fetch_jobs()
-total = len(jobs)
-applied = sum(1 for j in jobs if "Autofilled" in (j.get("status") or ""))
-queued = total - applied
-companies = len({(j.get("company") or "").strip().lower() for j in jobs if j.get("company") and j["company"] != "Pending"})
-rate = round(applied / total * 100) if total else 0
+def ask_ai(prompt, jobs, stats):
+    names, auto = gemini_models()
+    model = st.session_state.get("model") or auto
+    if not model:
+        return "error", "Couldn't find a usable Gemini model. Check your GEMINI_API_KEY on the Diagnostics tab."
+    recent = "; ".join(f"{j.get('title')} at {j.get('company')} ({j.get('status')})" for j in jobs[:10])
+    ctx = f"You help track job applications. {stats}. Most recent: {recent or 'none'}. Be concise."
+    try:
+        r = requests.post(f"{G_BASE}/models/{model}:generateContent", timeout=40,
+                          headers={"Content-Type": "application/json", "x-goog-api-key": G_KEY},
+                          json={"contents": [{"parts": [{"text": f"{ctx}\n\nUser: {prompt}"}]}]})
+        if r.status_code == 200:
+            return "assistant", r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        gemini_models.clear()
+        msg = r.json().get("error", {}).get("message", r.text)[:220]
+        return "error", f"Gemini ({model}) said {r.status_code}: {msg}"
+    except Exception as e:
+        return "error", f"Assistant failed: {e}"
 
-# ───────────────────────── Header ─────────────────────────
-st.markdown(f"""
-<div class="top">
-  <div>
-    <h1>Job Assistant</h1>
-    <p>Every job your scanner finds, and where each application stands.</p>
-  </div>
-  <div class="live"><i></i>Synced at {datetime.now():%H:%M:%S}</div>
-</div>
-""", unsafe_allow_html=True)
+# ───────────────────────── Data ─────────────────────────
+jobs, db_err = fetch_jobs()
+filled = lambda j: "Autofilled" in (j.get("status") or "")
+total = len(jobs); applied = sum(map(filled, jobs)); waiting = total - applied
+companies = len({(j.get("company") or "").lower() for j in jobs if j.get("company") and j["company"] != "Pending"})
+stats = f"Database has {total} jobs, {applied} filled, {waiting} waiting"
 
-if db_error:
-    st.error(f"{db_error}. Check SUPABASE_URL and SUPABASE_KEY in your secrets.")
+st.markdown(f"""<div class="hero"><h1>Job Assistant</h1>
+<p>Track every job, fill applications, and ask questions. Last synced {datetime.now():%H:%M:%S}.</p></div>""", unsafe_allow_html=True)
+if db_err:
+    st.error(db_err)
 
-# ───────────────────────── KPIs ─────────────────────────
-st.markdown(f"""
-<div class="kpis">
-  <div class="panel kpi"><div class="l">Jobs found</div><div class="v">{total}</div><div class="s">In your database</div></div>
-  <div class="panel kpi"><div class="l">Applications filled</div><div class="v">{applied}</div><div class="s">Autofilled successfully</div></div>
-  <div class="panel kpi"><div class="l">Waiting</div><div class="v">{queued}</div><div class="s">Not applied yet</div></div>
-  <div class="panel kpi"><div class="l">Companies</div><div class="v">{companies}</div><div class="s">Unique employers</div></div>
-</div>
-<div class="panel funnel">
-  <div class="row"><span>Application progress</span><b>{rate}% filled</b></div>
-  <div class="bar"><span style="width:{rate}%;background:var(--ok)"></span><span style="width:{100 - rate if total else 0}%;background:var(--wait);opacity:.55"></span></div>
-  <div class="legend"><span><i class="dot" style="background:var(--ok)"></i>Filled · {applied}</span><span><i class="dot" style="background:var(--wait)"></i>Waiting · {queued}</span></div>
-</div>
-""", unsafe_allow_html=True)
+t_dash, t_jobs, t_add, t_chat, t_diag = st.tabs(["📊 Dashboard", "📋 Jobs", "➕ Add jobs", "🤖 Assistant", "🛠 Diagnostics"])
 
-# ───────────────────────── Main grid ─────────────────────────
-left, right = st.columns([1.35, 1], gap="large")
+# ───────────────────────── Dashboard ─────────────────────────
+with t_dash:
+    def kpi(label, val, sub, color): return f'<div class="kpi" style="--c:{color}"><div class="l">{label}</div><div class="v">{val}</div><div class="s">{sub}</div></div>'
+    st.markdown('<div class="kpis">' + kpi("Jobs found", total, "In your database", "#8B6CFF") + kpi("Filled", applied, "Applications autofilled", "#34D399")
+                + kpi("Waiting", waiting, "Not applied yet", "#FBBF24") + kpi("Companies", companies, "Unique employers", "#22D3EE") + "</div>", unsafe_allow_html=True)
+    if not jobs:
+        st.info("No jobs to show yet. Add one in the **Add jobs** tab. If your table already has rows, your Supabase key may be blocked by Row Level Security; see **Diagnostics**.")
+    else:
+        c1, c2 = st.columns([1, 1.6], gap="large")
+        with c1:
+            st.markdown("##### Application status")
+            df = pd.DataFrame({"Status": ["Filled", "Waiting"], "Jobs": [applied, waiting]})
+            st.altair_chart(alt.Chart(df).mark_arc(innerRadius=62, stroke="#141B30").encode(
+                theta="Jobs:Q", color=alt.Color("Status:N", scale=alt.Scale(domain=["Filled", "Waiting"], range=["#34D399", "#FBBF24"]),
+                legend=alt.Legend(orient="bottom", title=None, labelColor="#EEF1FB"))).properties(height=250).configure_view(strokeWidth=0), use_container_width=True)
+        with c2:
+            st.markdown("##### Jobs found per day")
+            d = pd.to_datetime(pd.Series([j.get("created_at") for j in jobs]), errors="coerce", utc=True).dt.date.value_counts().sort_index().reset_index()
+            d.columns = ["Day", "Jobs"]
+            st.altair_chart(alt.Chart(d.tail(30)).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, color="#8B6CFF").encode(
+                x=alt.X("Day:T", title=None, axis=alt.Axis(labelColor="#8F9ABB")), y=alt.Y("Jobs:Q", title=None, axis=alt.Axis(labelColor="#8F9ABB", gridColor="#26304D")),
+                tooltip=["Day:T", "Jobs:Q"]).properties(height=250).configure_view(strokeWidth=0), use_container_width=True)
+        top = pd.Series([j.get("company") for j in jobs if j.get("company") and j["company"] != "Pending"]).value_counts().head(8).reset_index()
+        if len(top):
+            top.columns = ["Company", "Jobs"]
+            st.markdown("##### Top companies")
+            st.altair_chart(alt.Chart(top).mark_bar(cornerRadiusEnd=5, color="#22D3EE").encode(
+                y=alt.Y("Company:N", sort="-x", title=None, axis=alt.Axis(labelColor="#EEF1FB")), x=alt.X("Jobs:Q", title=None, axis=alt.Axis(labelColor="#8F9ABB", gridColor="#26304D")),
+                tooltip=["Company", "Jobs"]).properties(height=max(120, 30 * len(top))).configure_view(strokeWidth=0), use_container_width=True)
 
-with left:
-    f1, f2, f3 = st.columns([2.4, 1.2, 0.8])
-    query = f1.text_input("Search", placeholder="Search by title, company or location", label_visibility="collapsed")
-    status_filter = f2.selectbox("Status", ["All", "Filled", "Waiting"], label_visibility="collapsed")
-    if f3.button("Refresh", use_container_width=True):
-        fetch_jobs.clear()
-        st.rerun()
+# ───────────────────────── Jobs ─────────────────────────
+with t_jobs:
+    f1, f2, f3, f4 = st.columns([3, 1.4, 1.2, 0.8])
+    q = f1.text_input("Search", placeholder="🔍  Search title, company or location", label_visibility="collapsed")
+    sf = f2.selectbox("Status", ["All", "Waiting", "Filled"], label_visibility="collapsed")
+    per = f3.selectbox("Per page", [10, 25, 50], index=1, label_visibility="collapsed")
+    if f4.button("↻ Refresh", use_container_width=True):
+        fetch_jobs.clear(); st.rerun()
+    shown = [j for j in jobs if (sf == "All" or (sf == "Filled") == filled(j))
+             and q.lower() in " ".join(str(j.get(k) or "") for k in ("title", "company", "location")).lower()]
+    pages = max(1, -(-len(shown) // per))
+    page = st.number_input("Page", 1, pages, 1, label_visibility="collapsed") if pages > 1 else 1
+    st.markdown(f'<div class="sub">{len(shown)} jobs · page {page} of {pages}</div>', unsafe_allow_html=True)
+    if not shown:
+        st.info("No jobs match your filters.")
+    for i, j in enumerate(shown[(page - 1) * per: page * per]):
+        jid, link = j.get("id"), j.get("apply_url") or ""
+        with st.container(border=True):
+            c = st.columns([5, 1.1, 0.9, 0.9, 0.7], vertical_alignment="center")
+            meta = " · ".join(html.escape(str(j[k])) for k in ("company", "location") if j.get(k))
+            c[0].markdown(f"**{html.escape(j.get('title') or 'Untitled role')}**  \n<span class='sub'>{meta}</span>", unsafe_allow_html=True)
+            c[1].markdown('<span class="chip ok">Filled</span>' if filled(j) else '<span class="chip wait">Waiting</span>', unsafe_allow_html=True)
+            if link.startswith("http"): c[2].link_button("Open", link, use_container_width=True)
+            if not filled(j) and jid is not None and c[3].button("✓ Done", key=f"d{jid}{i}", use_container_width=True, help="Mark as applied"):
+                r = sb("PATCH", f"applications?id=eq.{jid}", json={"status": "Autofilled"})
+                (st.toast("Marked as filled ✅") if r.status_code < 300 else st.toast(f"Failed: {r.text[:120]}"))
+                fetch_jobs.clear(); st.rerun()
+            if jid is not None and c[4].button("🗑", key=f"x{jid}{i}", help="Delete"):
+                r = sb("DELETE", f"applications?id=eq.{jid}")
+                (st.toast("Deleted") if r.status_code < 300 else st.toast(f"Failed: {r.text[:120]}"))
+                fetch_jobs.clear(); st.rerun()
 
-    def is_filled(j):
-        return "Autofilled" in (j.get("status") or "")
+# ───────────────────────── Add ─────────────────────────
+with t_add:
+    a, b = st.columns(2, gap="large")
+    with a:
+        st.markdown("##### Add one job")
+        with st.form("one", clear_on_submit=True):
+            title = st.text_input("Job title", placeholder="Frontend Engineer")
+            company = st.text_input("Company", placeholder="Acme Inc.")
+            location = st.text_input("Location", placeholder="Remote")
+            url = st.text_input("Apply link", placeholder="https://…")
+            if st.form_submit_button("Add to queue", use_container_width=True):
+                if not url.startswith("http"):
+                    st.error("Add a valid apply link starting with http.")
+                else:
+                    r = sb("POST", "applications", json={"title": title or "Added manually", "company": company or "Pending",
+                                                          "location": location or "Custom", "apply_url": url, "status": "Queued"})
+                    if r.status_code < 300: st.success("Added ✅"); fetch_jobs.clear()
+                    else: st.error(f"Couldn't save: {r.text[:200]}")
+    with b:
+        st.markdown("##### Paste many links")
+        with st.form("many", clear_on_submit=True):
+            blob = st.text_area("One link per line", height=230, placeholder="https://…\nhttps://…")
+            if st.form_submit_button("Add all", use_container_width=True):
+                links = [l.strip() for l in blob.splitlines() if l.strip().startswith("http")]
+                if not links: st.error("No valid links found.")
+                else:
+                    rows = [{"title": "Added manually", "company": "Pending", "location": "Custom", "apply_url": l, "status": "Queued"} for l in links]
+                    r = sb("POST", "applications", json=rows)
+                    if r.status_code < 300: st.success(f"Added {len(rows)} jobs ✅"); fetch_jobs.clear()
+                    else: st.error(f"Couldn't save: {r.text[:200]}")
 
-    shown = [
-        j for j in jobs
-        if (status_filter == "All" or (status_filter == "Filled") == is_filled(j))
-        and query.lower() in " ".join(str(j.get(k) or "") for k in ("title", "company", "location")).lower()
-    ]
-
-    rows = ""
-    for j in shown[:50]:
-        title = html.escape(j.get("title") or "Untitled role")
-        meta = " · ".join(html.escape(str(j[k])) for k in ("company", "location") if j.get(k))
-        link = j.get("apply_url") or ""
-        link_html = f'<a href="{html.escape(link)}" target="_blank" rel="noopener">Open</a>' if link.startswith("http") else ""
-        chip = '<span class="chip ok">Filled</span>' if is_filled(j) else '<span class="chip wait">Waiting</span>'
-        rows += f'<div class="job"><div><div class="t">{title}</div><div class="m">{meta}{link_html}</div></div>{chip}</div>'
-
-    if not rows:
-        rows = '<div class="empty">No jobs match.<br>Paste a job link in the assistant to add one.</div>'
-
-    st.markdown(
-        f'<div class="panel"><div class="ledger-h"><h3>Jobs</h3><span>Showing {min(len(shown), 50)} of {len(shown)}</span></div>{rows}</div>',
-        unsafe_allow_html=True,
-    )
-
-with right:
-    st.markdown("### Assistant")
-    st.caption("Ask about your jobs, or paste a job link to add it to the queue.")
-
-    def ask_ai(prompt: str):
-        recent = "; ".join(f"{j.get('title')} at {j.get('company')} ({j.get('status')})" for j in jobs[:10])
-        context = (f"You help a user track job applications. Database: {total} jobs, {applied} filled, {queued} waiting. "
-                   f"Most recent: {recent or 'none'}.")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-        try:
-            r = requests.post(url, headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY},
-                              json={"contents": [{"parts": [{"text": f"{context}\n\nUser: {prompt}"}]}]}, timeout=30)
-            if r.status_code == 200:
-                return "assistant", r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return "error", f"Gemini returned {r.status_code}: {r.text[:300]}"
-        except (requests.RequestException, KeyError, IndexError) as e:
-            return "error", f"Assistant request failed: {e}"
-
-    if "chat_log" not in st.session_state:
-        st.session_state.chat_log = [("assistant", "Hi! Ask me about your applications, or paste a job link and I'll queue it.")]
-
-    box = st.container(height=470, border=True)
-    prompt = st.chat_input("Ask a question or paste a job link")
-
+# ───────────────────────── Assistant ─────────────────────────
+with t_chat:
+    st.session_state.setdefault("chat", [("assistant", "Hi! Ask me anything about your applications, or paste a job link and I'll queue it.")])
+    top = st.columns([1, 1, 1, 1, 0.8])
+    quick = None
+    for col, text in zip(top, ["Summarize my jobs", "What should I apply to first?", "How many are waiting?", "Give me interview tips"]):
+        if col.button(text, use_container_width=True): quick = text
+    if top[4].button("Clear chat", use_container_width=True):
+        st.session_state.chat = st.session_state.chat[:1]; st.rerun()
+    box = st.container(height=430, border=False)
+    prompt = st.chat_input("Ask a question or paste a job link…") or quick
     if prompt:
-        st.session_state.chat_log.append(("user", prompt))
+        st.session_state.chat.append(("user", prompt))
         if prompt.strip().startswith("http"):
-            try:
-                r = requests.post(f"{SUPABASE_URL}/rest/v1/applications", headers=HEADERS, timeout=8,
-                                  json={"title": "Added manually", "company": "Pending", "location": "Custom",
-                                        "apply_url": prompt.strip(), "status": "Queued"})
-                ok = r.status_code in (200, 201, 204)
-                fetch_jobs.clear()
-                st.session_state.chat_log.append(("assistant" if ok else "error",
-                                                  "Added to your queue." if ok else f"Couldn't save it ({r.status_code}): {r.text[:200]}"))
-            except requests.RequestException as e:
-                st.session_state.chat_log.append(("error", f"Couldn't save it: {e}"))
+            r = sb("POST", "applications", json={"title": "Added manually", "company": "Pending", "location": "Custom", "apply_url": prompt.strip(), "status": "Queued"})
+            fetch_jobs.clear()
+            st.session_state.chat.append(("assistant", "Added to your queue ✅") if r.status_code < 300 else ("error", f"Couldn't save: {r.text[:200]}"))
         else:
-            with box, st.spinner("Thinking…"):
-                st.session_state.chat_log.append(ask_ai(prompt))
-        st.rerun()
-
+            with st.spinner("Thinking…"):
+                st.session_state.chat.append(ask_ai(prompt, jobs, stats))
     with box:
-        for role, msg in st.session_state.chat_log:
-            if role == "error":
-                st.error(msg)
+        for role, msg in st.session_state.chat:
+            if role == "error": st.error(msg)
             else:
-                with st.chat_message(role):
-                    st.markdown(msg)
+                with st.chat_message(role): st.markdown(msg)
+
+# ───────────────────────── Diagnostics ─────────────────────────
+with t_diag:
+    st.markdown("##### Connections")
+    d1, d2 = st.columns(2)
+    d1.metric("Database", "Connected ✅" if not db_err else "Problem ❌")
+    names, auto = gemini_models()
+    d2.metric("Gemini", "Connected ✅" if names else "Problem ❌")
+    if names:
+        flash = [n for n in names if "flash" in n] or names
+        choice = st.selectbox("Model used by the assistant", ["Auto (newest Flash)"] + flash)
+        st.session_state["model"] = None if choice.startswith("Auto") else choice
+        st.caption(f"Auto currently picks: `{auto}`")
+    else:
+        st.error("Couldn't list Gemini models. Your GEMINI_API_KEY is probably invalid or expired.")
+    if st.button("Re-check connections"):
+        fetch_jobs.clear(); gemini_models.clear(); st.rerun()
+    st.markdown("##### Seeing 0 jobs but your table has rows?")
+    st.markdown("Supabase blocks the anon key from reading tables with Row Level Security turned on. In Supabase, open **Authentication → Policies → applications** and add a `SELECT` policy (and `INSERT`, `UPDATE`, `DELETE` if you want the buttons to work), or use your service-role key in `SUPABASE_KEY`.")
