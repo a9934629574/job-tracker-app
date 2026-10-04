@@ -2,10 +2,9 @@ import streamlit as st
 from supabase import create_client
 import google.generativeai as genai
 
-# 1. Page Config (Must be first)
+# 1. Page Config
 st.set_page_config(page_title="AI Job Agent", page_icon="🚀", layout="wide", initial_sidebar_state="expanded")
 
-# Custom CSS for the glowing metric cards
 st.markdown("""
 <style>
     header {visibility: hidden;}
@@ -19,23 +18,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 2. Secure Connection (Using .strip() to fix invisible space errors)
+# ==========================================
+# 2. THE BULLETPROOF CONNECTION FIX
+# ==========================================
 try:
-    url = st.secrets["SUPABASE_URL"].strip()
-    key = st.secrets["SUPABASE_KEY"].strip()
-    supabase = create_client(url, key)
+    raw_url = str(st.secrets["SUPABASE_URL"])
+    raw_key = str(st.secrets["SUPABASE_KEY"])
     
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"].strip())
+    # Aggressively clean the URL of quotes, spaces, and wrong paths
+    clean_url = raw_url.replace('"', '').replace("'", "").replace("/rest/v1/", "").replace("/rest/v1", "").strip()
+    if clean_url.endswith("/"):
+        clean_url = clean_url[:-1]
+    if not clean_url.startswith("http"):
+        clean_url = "https://" + clean_url
+        
+    # Clean the keys
+    clean_key = raw_key.replace('"', '').replace("'", "").strip()
+    clean_gemini = str(st.secrets["GEMINI_API_KEY"]).replace('"', '').replace("'", "").strip()
+
+    # Connect
+    supabase = create_client(clean_url, clean_key)
+    genai.configure(api_key=clean_gemini)
     model = genai.GenerativeModel('gemini-2.5-flash')
 except Exception as e:
-    st.error(f"Connection Error: {e}. Please check Streamlit Secrets.")
+    st.error(f"Failed to read secrets properly: {e}")
+    st.stop()
+# ==========================================
+
+# 3. Fetch Data Safely
+try:
+    response = supabase.table("applications").select("*").order("created_at", desc=True).execute()
+    jobs = response.data if response.data else []
+except Exception as e:
+    st.error(f"🚨 Network Error: Check if this URL is correct: `{clean_url}`")
     st.stop()
 
-# 3. Fetch Data
-response = supabase.table("applications").select("*").order("created_at", desc=True).execute()
-jobs = response.data if response.data else []
-
-# Calculate Stats for the Dashboard
+# Calculate Stats
 total_jobs = len(jobs)
 autofilled = sum(1 for j in jobs if "Autofilled" in j.get("status", ""))
 pending = total_jobs - autofilled
@@ -50,18 +68,15 @@ with st.sidebar:
 # 5. Main Dashboard View
 if page == "📊 Live Job Stream":
     st.subheader("Live Dashboard & Real-Time Stream")
-    st.caption("Monitoring job portals and auto-filling applications in real-time.")
     
-    # Metric Cards (Like your screenshot)
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Jobs Found", total_jobs)
     col2.metric("Autofilled / Ready", autofilled)
     col3.metric("Pending Review", pending)
     
     st.divider()
-    
-    # Job List
     st.markdown("### ⚡ Real-Time Job Stream")
+    
     if jobs:
         for row in jobs:
             with st.container():
@@ -72,12 +87,11 @@ if page == "📊 Live Job Stream":
                 c4.link_button("Review & Submit", row['apply_url'], use_container_width=True)
                 st.markdown("<hr style='margin: 0.5em 0px; border-color: #2A2D3D;'>", unsafe_allow_html=True)
     else:
-        st.info("Waiting for the morning scanner to find jobs...")
+        st.info("Waiting for jobs to be found...")
 
 # 6. AI Chat View
 elif page == "💬 Chat with AI":
     st.subheader("AI Assistant")
-    st.caption("Paste a job link here to add it to the manual queue, or ask me for an update.")
     
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "System online. Drop a link to autofill, or ask me for your latest stats."}]
@@ -100,7 +114,7 @@ elif page == "💬 Chat with AI":
                     "apply_url": prompt,
                     "status": "Queued for Next Run"
                 }).execute()
-                reply = "✅ **Link captured.** Added to the database queue for the next automation run."
+                reply = "✅ **Link captured.** Added to the database queue."
             else:
                 context = f"Total jobs: {total_jobs}. Recent jobs: {jobs[:3]}"
                 ai_response = model.generate_content(f"You are a sleek AI job agent. Answer briefly based on this data: {context}. User says: {prompt}")
