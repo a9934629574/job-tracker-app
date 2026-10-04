@@ -1,5 +1,7 @@
 import html
+import json
 import re
+import time
 from datetime import datetime
 
 import altair as alt
@@ -35,6 +37,7 @@ h1,h2,h3,.sora{font-family:'Sora',sans-serif!important;letter-spacing:-.02em;}
 .chip{display:inline-block;font-size:.76rem;font-weight:600;padding:.25rem .65rem;border-radius:999px;}
 .chip.ok{background:rgba(52,211,153,.14);color:var(--ok);} .chip.wait{background:rgba(251,191,36,.14);color:var(--wait);}
 .sub{color:var(--muted);font-size:.85rem}
+.chip.no{background:rgba(248,113,113,.14);color:var(--bad);} .chip.blue{background:rgba(139,108,255,.18);color:#B7A6FF;}
 
 /* tabs */
 .stTabs [data-baseweb="tab-list"]{gap:.4rem;border-bottom:1px solid var(--line);}
@@ -66,8 +69,10 @@ G_KEY = clean(st.secrets["GEMINI_API_KEY"])
 G_BASE = "https://generativelanguage.googleapis.com/v1beta"
 SB_H = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
-def sb(method, path, **kw):
-    return requests.request(method, f"{SB_URL}/rest/v1/{path}", headers=SB_H, timeout=10, **kw)
+def sb(method, path, prefer=None, **kw):
+    h = dict(SB_H)
+    if prefer: h["Prefer"] = prefer
+    return requests.request(method, f"{SB_URL}/rest/v1/{path}", headers=h, timeout=10, **kw)
 
 @st.cache_data(ttl=10, show_spinner=False)
 def fetch_jobs():
@@ -93,24 +98,88 @@ def gemini_models():
     flash.sort(key=lambda n: (ver(n), "lite" not in n), reverse=True)
     return names, (flash[0] if flash else None)
 
+def model_order():
+    """Preferred model first, then newer-to-older Flash, Flash-Lite, Pro, then stable aliases."""
+    names, _ = gemini_models()
+    ver = lambda n: tuple(int(x) for x in re.findall(r"\d+", n)) or (0,)
+    bad = ("image", "tts", "audio", "live", "embedding", "robotics", "computer", "exp", "thinking", "preview")
+    ok = lambda n: not any(b in n for b in bad)
+    flash = sorted([n for n in names if "flash" in n and "lite" not in n and ok(n)], key=ver, reverse=True)
+    lite = sorted([n for n in names if "lite" in n and ok(n)], key=ver, reverse=True)
+    pro = sorted([n for n in names if "pro" in n and ok(n)], key=ver, reverse=True)
+    prev = sorted([n for n in names if "flash" in n and "preview" in n], key=ver, reverse=True)
+    order = [st.session_state.get("model")] + flash[:3] + lite[:2] + pro[:1] + prev[:1] + ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    out = []
+    for m in order:
+        if m and m not in out: out.append(m)
+    return out
+
+def call_gemini(text):
+    """Try each model in order. Retry once on busy errors, then fall back to the next model."""
+    errs = []
+    for m in model_order()[:7]:
+        for attempt in (0, 1):
+            try:
+                r = requests.post(f"{G_BASE}/models/{m}:generateContent", timeout=40,
+                                  headers={"Content-Type": "application/json", "x-goog-api-key": G_KEY},
+                                  json={"contents": [{"parts": [{"text": text}]}]})
+            except requests.RequestException:
+                errs.append(f"{m}: network error"); break
+            if r.status_code == 200:
+                try:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"], m, errs
+                except (KeyError, IndexError):
+                    errs.append(f"{m}: empty reply"); break
+            if r.status_code in (401, 403):
+                return None, None, [f"Gemini rejected your key ({r.status_code}). Check GEMINI_API_KEY."]
+            if r.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                time.sleep(1.5); continue
+            errs.append(f"{m}: {r.status_code}"); break
+    return None, None, errs
+
+LEVELS = ["Any", "Entry", "Mid", "Senior"]
+DEFAULTS = {"roles": "Product Manager", "skills": "", "remote": True, "cities": "Hyderabad", "avoid": "", "level": "Any", "resume": ""}
+
+def current_profile():
+    s_ = st.session_state
+    return {k: s_.get(f"p_{k}", v) for k, v in DEFAULTS.items()}
+
+def split(v): return [x.strip().lower() for x in str(v).split(",") if x.strip()]
+
+def match(j, p):
+    """Rule-based fit: role in title + location rule (remote anywhere, on-site only in chosen cities)."""
+    title = (j.get("title") or "").lower(); loc = (j.get("location") or "").lower()
+    if any(a in f"{title} {loc} {(j.get('company') or '').lower()}" for a in split(p["avoid"])):
+        return "No", "Contains a keyword you skip"
+    roles = split(p["roles"])
+    role_ok = (not roles) or any(r in title or all(w in title for w in r.split()) for r in roles)
+    if not role_ok: return "No", "Title doesn't match your roles"
+    if "remote" in loc or "remote" in title or "anywhere" in loc or "work from home" in loc:
+        return ("Good", "Remote") if p["remote"] else ("No", "Remote jobs are off")
+    if any(c in loc for c in split(p["cities"])): return "Good", "In your city"
+    if not loc or loc in ("custom", "unknown"): return "Maybe", "Location unknown"
+    return "No", "Outside your cities"
+
+def read_resume(f):
+    if f.name.lower().endswith(".pdf"):
+        from pypdf import PdfReader
+        return "\n".join((pg.extract_text() or "") for pg in PdfReader(f).pages).strip()
+    return f.read().decode("utf-8", "ignore")
+
+def save_profile():
+    r = sb("POST", "job_profile?on_conflict=id", prefer="resolution=merge-duplicates,return=minimal",
+           json={"id": 1, "data": current_profile()})
+    return r.status_code < 300, r.text[:200]
+
 def ask_ai(prompt, jobs, stats):
-    names, auto = gemini_models()
-    model = st.session_state.get("model") or auto
-    if not model:
-        return "error", "Couldn't find a usable Gemini model. Check your GEMINI_API_KEY on the Diagnostics tab."
+    p = current_profile()
     recent = "; ".join(f"{j.get('title')} at {j.get('company')} ({j.get('status')})" for j in jobs[:10])
-    ctx = f"You help track job applications. {stats}. Most recent: {recent or 'none'}. Be concise."
-    try:
-        r = requests.post(f"{G_BASE}/models/{model}:generateContent", timeout=40,
-                          headers={"Content-Type": "application/json", "x-goog-api-key": G_KEY},
-                          json={"contents": [{"parts": [{"text": f"{ctx}\n\nUser: {prompt}"}]}]})
-        if r.status_code == 200:
-            return "assistant", r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        gemini_models.clear()
-        msg = r.json().get("error", {}).get("message", r.text)[:220]
-        return "error", f"Gemini ({model}) said {r.status_code}: {msg}"
-    except Exception as e:
-        return "error", f"Assistant failed: {e}"
+    ctx = (f"You help track job applications. {stats}. Most recent: {recent or 'none'}. "
+           f"Preferences: roles={p['roles']}; remote anywhere={p['remote']}; on-site cities={p['cities']}; level={p['level']}. "
+           f"Resume: {p['resume'][:3000] or 'not provided'}. Be concise.")
+    out, m, errs = call_gemini(f"{ctx}\n\nUser: {prompt}")
+    if out: return "assistant", out + f"\n\n*via {m}*"
+    return "error", "All models failed: " + "; ".join(errs[-4:]) + ". Try again in a minute."
 
 # ───────────────────────── Data ─────────────────────────
 jobs, db_err = fetch_jobs()
@@ -118,13 +187,22 @@ filled = lambda j: "Autofilled" in (j.get("status") or "")
 total = len(jobs); applied = sum(map(filled, jobs)); waiting = total - applied
 companies = len({(j.get("company") or "").lower() for j in jobs if j.get("company") and j["company"] != "Pending"})
 stats = f"Database has {total} jobs, {applied} filled, {waiting} waiting"
+if "profile_loaded" not in st.session_state:
+    saved = {}
+    try:
+        r = sb("GET", "job_profile?id=eq.1&select=data")
+        if r.status_code == 200 and r.json(): saved = r.json()[0]["data"]
+    except Exception:
+        pass
+    st.session_state["profile_loaded"] = True
+    for k, v in {**DEFAULTS, **saved}.items(): st.session_state.setdefault(f"p_{k}", v)
 
 st.markdown(f"""<div class="hero"><h1>Job Assistant</h1>
 <p>Track every job, fill applications, and ask questions. Last synced {datetime.now():%H:%M:%S}.</p></div>""", unsafe_allow_html=True)
 if db_err:
     st.error(db_err)
 
-t_dash, t_jobs, t_add, t_chat, t_diag = st.tabs(["📊 Dashboard", "📋 Jobs", "➕ Add jobs", "🤖 Assistant", "🛠 Diagnostics"])
+t_dash, t_jobs, t_prof, t_add, t_chat, t_diag = st.tabs(["📊 Dashboard", "📋 Jobs", "🎯 Profile", "➕ Add jobs", "🤖 Assistant", "🛠 Diagnostics"])
 
 # ───────────────────────── Dashboard ─────────────────────────
 with t_dash:
@@ -160,15 +238,27 @@ with t_dash:
 with t_jobs:
     f1, f2, f3, f4 = st.columns([3, 1.4, 1.2, 0.8])
     q = f1.text_input("Search", placeholder="🔍  Search title, company or location", label_visibility="collapsed")
-    sf = f2.selectbox("Status", ["All", "Waiting", "Filled"], label_visibility="collapsed")
+    sf = f2.selectbox("Status", ["All", "Waiting", "Filled", "Matches my profile"], label_visibility="collapsed")
     per = f3.selectbox("Per page", [10, 25, 50], index=1, label_visibility="collapsed")
     if f4.button("↻ Refresh", use_container_width=True):
         fetch_jobs.clear(); st.rerun()
-    shown = [j for j in jobs if (sf == "All" or (sf == "Filled") == filled(j))
+    P = current_profile()
+    M = {id(j): match(j, P) for j in jobs}
+    def status_ok(j):
+        if sf == "All": return True
+        if sf == "Matches my profile": return M[id(j)][0] == "Good" and not filled(j)
+        return (sf == "Filled") == filled(j)
+    shown = [j for j in jobs if status_ok(j)
              and q.lower() in " ".join(str(j.get(k) or "") for k in ("title", "company", "location")).lower()]
     pages = max(1, -(-len(shown) // per))
     page = st.number_input("Page", 1, pages, 1, label_visibility="collapsed") if pages > 1 else 1
     st.markdown(f'<div class="sub">{len(shown)} jobs · page {page} of {pages}</div>', unsafe_allow_html=True)
+    todo = [j for j in jobs if M[id(j)][0] == "Good" and not filled(j) and j.get("status") != "Approved" and j.get("id") is not None]
+    if todo and st.button(f"✅ Approve {len(todo)} matching jobs for auto-apply", type="primary"):
+        ids = ",".join(str(j["id"]) for j in todo[:200])
+        r = sb("PATCH", f"applications?id=in.({ids})", json={"status": "Approved"})
+        st.toast(f"Approved {min(len(todo), 200)} jobs ✅" if r.status_code < 300 else f"Failed: {r.text[:150]}")
+        fetch_jobs.clear(); st.rerun()
     if not shown:
         st.info("No jobs match your filters.")
     for i, j in enumerate(shown[(page - 1) * per: page * per]):
@@ -177,7 +267,10 @@ with t_jobs:
             c = st.columns([5, 1.1, 0.9, 0.9, 0.7], vertical_alignment="center")
             meta = " · ".join(html.escape(str(j[k])) for k in ("company", "location") if j.get(k))
             c[0].markdown(f"**{html.escape(j.get('title') or 'Untitled role')}**  \n<span class='sub'>{meta}</span>", unsafe_allow_html=True)
-            c[1].markdown('<span class="chip ok">Filled</span>' if filled(j) else '<span class="chip wait">Waiting</span>', unsafe_allow_html=True)
+            lvl, why = M[id(j)]
+            stat = '<span class="chip ok">Filled</span>' if filled(j) else ('<span class="chip blue">Approved</span>' if j.get("status") == "Approved" else '<span class="chip wait">Waiting</span>')
+            fit = {"Good": "ok", "Maybe": "wait", "No": "no"}[lvl]
+            c[1].markdown(f'{stat}<br><span class="chip {fit}" title="{why}">{lvl} fit</span>', unsafe_allow_html=True)
             if link.startswith("http"): c[2].link_button("Open", link, use_container_width=True)
             if not filled(j) and jid is not None and c[3].button("✓ Done", key=f"d{jid}{i}", use_container_width=True, help="Mark as applied"):
                 r = sb("PATCH", f"applications?id=eq.{jid}", json={"status": "Autofilled"})
@@ -187,6 +280,58 @@ with t_jobs:
                 r = sb("DELETE", f"applications?id=eq.{jid}")
                 (st.toast("Deleted") if r.status_code < 300 else st.toast(f"Failed: {r.text[:120]}"))
                 fetch_jobs.clear(); st.rerun()
+
+# ───────────────────────── Profile ─────────────────────────
+with t_prof:
+    if "pending_fill" in st.session_state:
+        for k, v in st.session_state.pop("pending_fill").items(): st.session_state[f"p_{k}"] = v
+    L, R = st.columns([1.1, 1], gap="large")
+    with L:
+        st.markdown("##### 1. Your resume")
+        up = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"], label_visibility="collapsed")
+        if up is not None and st.session_state.get("last_resume") != (up.name, up.size):
+            try:
+                st.session_state["p_resume"] = read_resume(up); st.session_state["last_resume"] = (up.name, up.size)
+            except Exception as e:
+                st.error(f"Couldn't read that file ({e}). Paste your resume text below instead.")
+        st.text_area("Resume text", key="p_resume", height=250, placeholder="Or paste your resume here…")
+        analyze = st.button("✨ Fill my preferences from my resume", use_container_width=True)
+        if analyze:
+            if len(st.session_state.p_resume.strip()) < 80:
+                st.warning("Add your resume first.")
+            else:
+                with st.spinner("Reading your resume…"):
+                    out, m, errs = call_gemini('From this resume return ONLY JSON like {"roles": "comma separated job titles to target", "skills": "comma separated top skills", "level": "Entry|Mid|Senior"}.\n\nResume:\n' + st.session_state.p_resume[:8000])
+                fill = None
+                try:
+                    data = json.loads(re.search(r"\{.*\}", out, re.S).group(0))
+                    fill = {k: (data[k] if isinstance(data[k], str) else ", ".join(data[k])) for k in ("roles", "skills") if k in data}
+                    if data.get("level") in LEVELS: fill["level"] = data["level"]
+                except Exception:
+                    st.error("Couldn't read the AI's answer. " + "; ".join(errs[-3:]))
+                if fill:
+                    st.session_state["pending_fill"] = fill; st.rerun()
+    with R:
+        st.markdown("##### 2. What you want")
+        st.text_input("Roles (comma separated)", key="p_roles", placeholder="Product Manager, Associate Product Manager")
+        st.text_area("Key skills", key="p_skills", height=80)
+        st.selectbox("Experience level", LEVELS, key="p_level")
+        st.toggle("🌍 Remote jobs from anywhere are fine", key="p_remote")
+        st.text_input("On-site / hybrid only in these cities", key="p_cities", placeholder="Hyderabad, Bengaluru")
+        st.text_input("Skip jobs containing", key="p_avoid", placeholder="intern, sales")
+        if st.button("💾 Save preferences", type="primary", use_container_width=True):
+            ok, err = save_profile()
+            if ok: st.success("Saved ✅")
+            else:
+                st.error(f"Couldn't save to the database: {err}")
+                st.markdown("Run this once in the Supabase SQL editor, then save again:")
+                st.code("create table if not exists job_profile (id int primary key, data jsonb not null);\nalter table job_profile enable row level security;\ncreate policy \"open\" on job_profile for all using (true) with check (true);", language="sql")
+    st.markdown("##### Your waiting jobs, scored against these preferences")
+    pend = [j for j in jobs if not filled(j)]
+    cnt = [sum(1 for j in pend if match(j, current_profile())[0] == k) for k in ("Good", "Maybe", "No")]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Good fit", cnt[0]); m2.metric("Maybe", cnt[1]); m3.metric("Not a fit", cnt[2])
+    st.caption("Go to the Jobs tab and press **Approve matching jobs** to mark the good fits as Approved.")
 
 # ───────────────────────── Add ─────────────────────────
 with t_add:
@@ -257,6 +402,7 @@ with t_diag:
         choice = st.selectbox("Model used by the assistant", ["Auto (newest Flash)"] + flash)
         st.session_state["model"] = None if choice.startswith("Auto") else choice
         st.caption(f"Auto currently picks: `{auto}`")
+        st.caption("Fallback order: " + " → ".join(model_order()[:7]))
     else:
         st.error("Couldn't list Gemini models. Your GEMINI_API_KEY is probably invalid or expired.")
     if st.button("Re-check connections"):
