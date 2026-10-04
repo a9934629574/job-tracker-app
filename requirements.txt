@@ -2,3 +2,7 @@ streamlit
 supabase
 pandas
 google-generativeai
+requests
+pandas
+altair
+pypdf
