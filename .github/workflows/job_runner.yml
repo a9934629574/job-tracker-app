@@ -1,0 +1,15 @@
+name: Daily Morning Job Hunter
+
+on:
+  schedule:
+    - cron: '30 2 * * *' # 2:30 AM UTC is 8:00 AM in Hyderabad
+  workflow_dispatch:
+
+jobs:
+  hunt-and-fill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # Automatically kills the process after 15 mins to save free tier limits
+    steps:
+      - name: Run Job Script
+        run: echo "Starting AI Browser to search and fill jobs..."
+        # The browser-use python script will be added here later once the app is verified working
